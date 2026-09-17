@@ -85,7 +85,7 @@ npm run dev              # http://localhost:5173
 
 ## Déploiement production
 
-- **Backend → Render** : `backend/render.yaml` (base PostgreSQL managée incluse).
+- **Backend → Render** : `render.yaml` (base PostgreSQL managée incluse).
   Renseigner les secrets (`JWT_*`, `SASPAY_*`, `ADMIN_BOOTSTRAP_*`) dans le
   dashboard Render (jamais dans le repo Git).
 - **PWA → Vercel** : importer `/web`, variable d'env `VITE_API_BASE_URL`
