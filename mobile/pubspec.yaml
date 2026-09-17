@@ -1,0 +1,62 @@
+name: docuscan_burkina
+description: "DocuScan Burkina - Numerisation de documents en PDF pour etudiants."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.9.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # State management
+  provider: 6.1.5+1
+
+  # Networking
+  http: 1.5.0
+
+  # Local storage
+  shared_preferences: 2.5.3
+  hive: 2.2.3
+  hive_flutter: 1.1.0
+
+  # Camera / image capture & processing
+  image_picker: ^1.1.2
+  image: ^4.3.0
+
+  # PDF generation
+  pdf: ^3.11.1
+  printing: ^5.13.4
+
+  # Sharing & file system
+  share_plus: ^10.1.4
+  path_provider: ^2.1.5
+  open_filex: ^4.6.0
+
+  # Payment checkout / links
+  url_launcher: ^6.3.1
+  webview_flutter: 4.13.0
+
+  # Permissions
+  permission_handler: ^11.3.1
+
+  # Utils
+  uuid: ^4.5.1
+  intl: ^0.19.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  hive_generator: ^2.0.1
+  build_runner: ^2.4.13
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/icons/
