@@ -54,6 +54,10 @@ export class PaymentsService {
     const saved = await this.paymentRepo.save(localPayment);
 
     const idempotencyKey = uuidv4();
+    this.logger.log(
+      `initiateSoftpay: userId=${userId} paymentId=${saved.id} pack=${pack.id} ` +
+        `amount=${pack.priceFcfa} network=${dto.network}`,
+    );
     try {
       const response = await this.saspayService.initiateSoftpay(
         {
@@ -80,11 +84,18 @@ export class PaymentsService {
       saved.rawResponse = response as unknown as Record<string, unknown>;
       await this.paymentRepo.save(saved);
 
+      this.logger.log(
+        `initiateSoftpay: succès paymentId=${saved.id} saspayReference=${response.id} status=${response.status}`,
+      );
+
       return saved;
     } catch (err) {
       saved.status = SaspayPaymentStatus.FAILED;
       saved.rawResponse = { error: (err as Error).message };
       await this.paymentRepo.save(saved);
+      this.logger.error(
+        `initiateSoftpay: échec paymentId=${saved.id}: ${(err as Error).message}`,
+      );
       throw err;
     }
   }
@@ -99,6 +110,12 @@ export class PaymentsService {
     const user = await this.usersRepo.findById(userId);
     if (!user) throw new NotFoundException('Utilisateur introuvable');
 
+    // Validation explicite AVANT tout appel à Saspay : si return_url n'est
+    // pas une URL absolue valide, on refuse l'appel immédiatement avec une
+    // erreur claire plutôt que de laisser Saspay répondre 400 et masquer la
+    // vraie cause derrière un 502 générique "Erreur Saspay".
+    const returnUrl = this.saspayService.getValidatedReturnUrl();
+
     const localPayment = this.paymentRepo.create({
       userId,
       creditPackId: pack.id,
@@ -109,6 +126,11 @@ export class PaymentsService {
     });
     const saved = await this.paymentRepo.save(localPayment);
 
+    this.logger.log(
+      `initiateCheckout: userId=${userId} paymentId=${saved.id} pack=${pack.id} ` +
+        `amount=${pack.priceFcfa} return_url=${returnUrl}`,
+    );
+
     try {
       const session = await this.saspayService.createCheckoutSession({
         amount: pack.priceFcfa.toFixed(2),
@@ -117,7 +139,7 @@ export class PaymentsService {
         description: `DocuScan Burkina - ${pack.name}`,
         customer_email: user.email,
         customer_name: user.fullName ?? user.email,
-        return_url: this.saspayService.returnUrl || undefined,
+        return_url: returnUrl,
         metadata: { docuscan_payment_id: saved.id, user_id: userId },
       });
 
@@ -127,11 +149,18 @@ export class PaymentsService {
       saved.rawResponse = session as unknown as Record<string, unknown>;
       await this.paymentRepo.save(saved);
 
+      this.logger.log(
+        `initiateCheckout: succès paymentId=${saved.id} saspayReference=${session.id} checkoutUrl=${session.checkout_url}`,
+      );
+
       return saved;
     } catch (err) {
       saved.status = SaspayPaymentStatus.FAILED;
       saved.rawResponse = { error: (err as Error).message };
       await this.paymentRepo.save(saved);
+      this.logger.error(
+        `initiateCheckout: échec paymentId=${saved.id}: ${(err as Error).message}`,
+      );
       throw err;
     }
   }

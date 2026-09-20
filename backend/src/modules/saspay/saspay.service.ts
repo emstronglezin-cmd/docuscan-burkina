@@ -44,6 +44,76 @@ export class SaspayService {
     }
   }
 
+  private isValidAbsoluteUrl(value: string | undefined | null): boolean {
+    if (!value) return false;
+    try {
+      const url = new URL(value);
+      return url.protocol === 'http:' || url.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Renvoie l'URL de retour configurée (SASPAY_RETURN_URL) après avoir
+   * vérifié qu'il s'agit bien d'une URL absolue valide (http/https).
+   *
+   * Échoue explicitement (fail-fast) plutôt que de laisser un champ vide
+   * partir vers Saspay : sans cette vérification, `JSON.stringify` omet
+   * silencieusement les valeurs `undefined`, Saspay répond alors par un
+   * 400 explicite (`{"error":{"return_url":["Saisissez une URL valide."]}}`)
+   * qui était ensuite masqué par un 502 générique "Erreur Saspay".
+   */
+  getValidatedReturnUrl(): string {
+    const url = this.saspayConfig.returnUrl;
+    if (!this.isValidAbsoluteUrl(url)) {
+      this.logger.error(
+        `SASPAY_RETURN_URL est absente ou invalide (valeur actuelle: "${url}"). ` +
+          "Configurez une URL absolue complète (ex: https://votre-pwa.vercel.app/paiement/retour) " +
+          "dans les variables d'environnement du service backend sur Render (variable déclarée avec sync:false, " +
+          'elle doit être saisie manuellement dans le dashboard Render).',
+      );
+      throw new InternalServerErrorException(
+        "Configuration serveur invalide : SASPAY_RETURN_URL n'est pas une URL absolue valide (http/https). " +
+          "Cette valeur doit être définie dans les variables d'environnement du service backend sur Render.",
+      );
+    }
+    return url;
+  }
+
+  /**
+   * Extrait un message d'erreur lisible depuis une réponse d'erreur Saspay.
+   * Le format réel observé en production est :
+   *   { "success": false, "error": { "<champ>": ["<message>"] }, "code": 400 }
+   * c'est-à-dire un objet de validation champ -> [messages], PAS un champ
+   * plat `message`. L'ancien code supposait `{ message, code }` et tombait
+   * donc systématiquement sur le fallback générique "Erreur Saspay",
+   * masquant la vraie raison (ex: "return_url: Saisissez une URL valide.").
+   */
+  private extractSaspayErrorMessage(json: Record<string, unknown>): string {
+    const errorField = json['error'];
+
+    if (typeof errorField === 'string' && errorField) {
+      return errorField;
+    }
+
+    if (errorField && typeof errorField === 'object') {
+      const parts: string[] = [];
+      for (const [field, messages] of Object.entries(errorField as Record<string, unknown>)) {
+        const text = Array.isArray(messages) ? messages.join(' ') : String(messages);
+        parts.push(`${field}: ${text}`);
+      }
+      if (parts.length > 0) return parts.join(' | ');
+    }
+
+    const flatMessage = json['message'];
+    if (typeof flatMessage === 'string' && flatMessage) {
+      return flatMessage;
+    }
+
+    return 'Erreur Saspay';
+  }
+
   private async request<T>(
     method: 'GET' | 'POST',
     path: string,
@@ -61,6 +131,11 @@ export class SaspayService {
       headers['Idempotency-Key'] = idempotencyKey;
     }
 
+    // Log de la requête sortante (jamais l'Authorization/API key, uniquement
+    // le corps métier) pour pouvoir diagnostiquer les échecs directement
+    // depuis les logs Render sans avoir à reproduire le bug en local.
+    this.logger.log(`Saspay ${method} ${path} -> requête: ${JSON.stringify(body ?? {})}`);
+
     let response: Response;
     try {
       response = await fetch(url, {
@@ -75,11 +150,15 @@ export class SaspayService {
 
     const json = (await response.json().catch(() => ({}))) as Record<string, unknown>;
 
+    this.logger.log(`Saspay ${method} ${path} -> réponse (${response.status}): ${JSON.stringify(json)}`);
+
     if (!response.ok) {
+      const detailedMessage = this.extractSaspayErrorMessage(json);
       this.logger.warn(`Saspay ${method} ${path} -> ${response.status}: ${JSON.stringify(json)}`);
-      const error = json as { message?: string; code?: string };
+      this.logger.error(`Détail erreur Saspay (${method} ${path}): ${detailedMessage}`);
+      const error = json as { code?: string | number };
       throw new BadGatewayException({
-        message: error.message ?? 'Erreur Saspay',
+        message: detailedMessage,
         code: error.code ?? 'saspay_error',
         httpStatus: response.status,
       });

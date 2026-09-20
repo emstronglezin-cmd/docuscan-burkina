@@ -5,6 +5,7 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Logger,
   Param,
   Post,
   Req,
@@ -23,17 +24,25 @@ import { SaspayWebhookEnvelope } from '../saspay/saspay.types';
 @UseGuards(JwtAuthGuard)
 @Controller({ path: 'payments', version: '1' })
 export class PaymentsController {
+  private readonly logger = new Logger(PaymentsController.name);
+
   constructor(private readonly paymentsService: PaymentsService) {}
 
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('softpay')
   async softpay(@CurrentUser() user: CurrentUserPayload, @Body() dto: InitiateSoftpayDto) {
+    this.logger.log(
+      `POST /payments/softpay userId=${user.userId} creditPackId=${dto.creditPackId} network=${dto.network}`,
+    );
     return this.paymentsService.initiateSoftpay(user.userId, dto);
   }
 
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('checkout')
   async checkout(@CurrentUser() user: CurrentUserPayload, @Body() dto: InitiateCheckoutDto) {
+    this.logger.log(
+      `POST /payments/checkout userId=${user.userId} creditPackId=${dto.creditPackId}`,
+    );
     return this.paymentsService.initiateCheckout(user.userId, dto);
   }
 
