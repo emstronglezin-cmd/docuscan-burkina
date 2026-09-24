@@ -1,7 +1,7 @@
 /**
- * Types reflétant fidèlement l'API SasPay documentée sur
+ * Types reflétant l'API SasPay documentée sur
  * https://docs.saspay.me — voir /api-reference/introduction et
- * /api-reference/payments. Ne PAS inventer de champs non documentés.
+ * /api-reference/payments.
  */
 
 export type SaspayTransactionStatus = 'PENDING' | 'SUCCESS' | 'FAILED' | 'CANCELLED';
@@ -43,28 +43,36 @@ export interface SaspayCheckoutCreateRequest {
   expires_at?: string;
 }
 
+/** Données de la session renvoyées sous la propriété `data` par POST /checkout-sessions/. */
 export interface SaspayCheckoutSession {
   id: string;
-  merchant: string;
-  created_by_member: string | null;
-  slug: string;
+  merchant?: string;
+  created_by_member?: string | null;
+  slug?: string;
   checkout_url: string;
   amount: string;
   currency: string;
   description?: string;
   country?: string;
-  customer_email: string;
-  customer_name: string;
+  customer_email?: string;
+  customer_name?: string;
   customer_phone?: string;
   return_url?: string;
   metadata?: Record<string, unknown>;
   status: SaspayTransactionStatus;
-  expires_at: string | null;
-  transaction: string | null;
-  payment_link: string | null;
-  paid_at: string | null;
-  created_at: string;
-  updated_at: string;
+  expires_at?: string | null;
+  transaction?: string | null;
+  payment_link?: string | null;
+  paid_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/** Enveloppe réellement renvoyée par la création de checkout observée en production. */
+export interface SaspayCheckoutSessionResponse {
+  success: true;
+  data: SaspayCheckoutSession;
+  code: number;
 }
 
 export interface SaspayTransaction {
@@ -128,6 +136,8 @@ export interface SaspayWebhookEnvelope {
     country?: string;
     network?: string;
     msisdn?: string;
+    /** Peut lier une transaction à la session interne lors d'un checkout hébergé. */
+    metadata?: Record<string, unknown>;
     [key: string]: unknown;
   };
 }

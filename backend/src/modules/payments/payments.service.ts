@@ -14,6 +14,12 @@ import { UsersRepositoryLite } from './users-repository-lite';
 import { InitiateCheckoutDto, InitiateSoftpayDto } from './dto/payment.dto';
 import { SaspayWebhookEnvelope } from '../saspay/saspay.types';
 
+const SASPAY_MINIMUM_CHECKOUT_AMOUNT_XOF = 200;
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'Erreur inconnue';
+}
+
 @Injectable()
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
@@ -35,7 +41,7 @@ export class PaymentsService {
   async initiateSoftpay(userId: string, dto: InitiateSoftpayDto) {
     const pack = await this.creditPacksService.findOne(dto.creditPackId);
     if (!pack.isActive) {
-      throw new BadRequestException('Ce pack de crédits n\'est plus disponible');
+      throw new BadRequestException("Ce pack de crédits n'est plus disponible");
     }
 
     const user = await this.usersRepo.findById(userId);
@@ -81,7 +87,7 @@ export class PaymentsService {
       saved.checkoutUrl = response.checkout_url || undefined;
       saved.status = this.mapSaspayStatus(response.status);
       saved.idempotencyKey = idempotencyKey;
-      saved.rawResponse = response as unknown as Record<string, unknown>;
+      saved.rawResponse = { ...response };
       await this.paymentRepo.save(saved);
 
       this.logger.log(
@@ -89,13 +95,12 @@ export class PaymentsService {
       );
 
       return saved;
-    } catch (err) {
+    } catch (err: unknown) {
+      const message = getErrorMessage(err);
       saved.status = SaspayPaymentStatus.FAILED;
-      saved.rawResponse = { error: (err as Error).message };
+      saved.rawResponse = { error: message };
       await this.paymentRepo.save(saved);
-      this.logger.error(
-        `initiateSoftpay: échec paymentId=${saved.id}: ${(err as Error).message}`,
-      );
+      this.logger.error(`initiateSoftpay: échec paymentId=${saved.id}: ${message}`);
       throw err;
     }
   }
@@ -104,7 +109,12 @@ export class PaymentsService {
   async initiateCheckout(userId: string, dto: InitiateCheckoutDto) {
     const pack = await this.creditPacksService.findOne(dto.creditPackId);
     if (!pack.isActive) {
-      throw new BadRequestException('Ce pack de crédits n\'est plus disponible');
+      throw new BadRequestException("Ce pack de crédits n'est plus disponible");
+    }
+    if (pack.priceFcfa < SASPAY_MINIMUM_CHECKOUT_AMOUNT_XOF) {
+      throw new BadRequestException(
+        `Ce pack coûte ${pack.priceFcfa} XOF. Le montant minimum accepté par SASPAY est de ${SASPAY_MINIMUM_CHECKOUT_AMOUNT_XOF} XOF.`,
+      );
     }
 
     const user = await this.usersRepo.findById(userId);
@@ -146,7 +156,7 @@ export class PaymentsService {
       saved.saspayReference = session.id;
       saved.checkoutUrl = session.checkout_url;
       saved.status = this.mapSaspayStatus(session.status);
-      saved.rawResponse = session as unknown as Record<string, unknown>;
+      saved.rawResponse = { ...session };
       await this.paymentRepo.save(saved);
 
       this.logger.log(
@@ -154,13 +164,12 @@ export class PaymentsService {
       );
 
       return saved;
-    } catch (err) {
+    } catch (err: unknown) {
+      const message = getErrorMessage(err);
       saved.status = SaspayPaymentStatus.FAILED;
-      saved.rawResponse = { error: (err as Error).message };
+      saved.rawResponse = { error: message };
       await this.paymentRepo.save(saved);
-      this.logger.error(
-        `initiateCheckout: échec paymentId=${saved.id}: ${(err as Error).message}`,
-      );
+      this.logger.error(`initiateCheckout: échec paymentId=${saved.id}: ${message}`);
       throw err;
     }
   }
@@ -186,11 +195,11 @@ export class PaymentsService {
       if (payment.method === SaspayPaymentMethod.CHECKOUT) {
         const session = await this.saspayService.getCheckoutSession(payment.saspayReference);
         saspayStatus = session.status;
-        payment.rawResponse = session as unknown as Record<string, unknown>;
+        payment.rawResponse = { ...session };
       } else {
         const transaction = await this.saspayService.verifyPayment(payment.saspayReference);
         saspayStatus = transaction.status;
-        payment.rawResponse = transaction as unknown as Record<string, unknown>;
+        payment.rawResponse = { ...transaction };
       }
 
       payment.status = this.mapSaspayStatus(saspayStatus);
@@ -199,8 +208,8 @@ export class PaymentsService {
       if (payment.status === SaspayPaymentStatus.SUCCESS) {
         await this.applyCreditsIfNeeded(payment);
       }
-    } catch (err) {
-      this.logger.warn(`Échec de vérification Saspay pour ${payment.id}: ${(err as Error).message}`);
+    } catch (err: unknown) {
+      this.logger.warn(`Échec de vérification Saspay pour ${payment.id}: ${getErrorMessage(err)}`);
     }
 
     return payment;
@@ -219,13 +228,45 @@ export class PaymentsService {
       return;
     }
 
-    const payment = await this.paymentRepo.findOne({ where: { saspayReference: saspayId } });
+    // Pour un checkout hébergé, SASPAY peut envoyer l'id de transaction dans
+    // data.id alors que saspayReference contient l'id de session checkout.
+    // Les métadonnées envoyées à la création relient les deux lorsqu'elles
+    // sont incluses dans l'événement; la recherche par référence reste le
+    // fallback pour Softpay et les événements utilisant déjà l'id enregistré.
+    const metadataPaymentId = data.metadata?.['docuscan_payment_id'];
+    const [paymentByMetadata, paymentByReference] = await Promise.all([
+      typeof metadataPaymentId === 'string' && metadataPaymentId.trim()
+        ? this.paymentRepo.findOne({ where: { id: metadataPaymentId } })
+        : Promise.resolve(null),
+      this.paymentRepo.findOne({ where: { saspayReference: saspayId } }),
+    ]);
+
+    if (paymentByMetadata && paymentByReference && paymentByMetadata.id !== paymentByReference.id) {
+      this.logger.warn(
+        `Webhook Saspay: références contradictoires pour la transaction ${saspayId}`,
+      );
+      return;
+    }
+
+    const payment = paymentByMetadata ?? paymentByReference;
     if (!payment) {
       this.logger.warn(`Webhook Saspay reçu pour une transaction inconnue: ${saspayId}`);
       return;
     }
 
-    payment.lastWebhookPayload = envelope as unknown as Record<string, unknown>;
+    const metadataUserId = data.metadata?.['user_id'];
+    if (
+      paymentByMetadata &&
+      typeof metadataUserId === 'string' &&
+      metadataUserId !== payment.userId
+    ) {
+      this.logger.warn(
+        `Webhook Saspay: user_id des métadonnées incohérent pour le paiement ${payment.id}`,
+      );
+      return;
+    }
+
+    payment.lastWebhookPayload = { ...envelope };
 
     if (event === 'transaction.success') {
       payment.status = SaspayPaymentStatus.SUCCESS;

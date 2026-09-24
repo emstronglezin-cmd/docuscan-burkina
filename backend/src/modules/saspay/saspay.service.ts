@@ -9,10 +9,32 @@ import { AppConfig } from '../../config/configuration';
 import {
   SaspayCheckoutCreateRequest,
   SaspayCheckoutSession,
+  SaspayCheckoutSessionResponse,
   SaspaySoftpayRequest,
   SaspaySoftpayResponse,
   SaspayTransaction,
+  SaspayTransactionStatus,
 } from './saspay.types';
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+function optionalStringOrNull(value: unknown): string | null | undefined {
+  return value === null ? null : optionalString(value);
+}
+
+function isTransactionStatus(value: unknown): value is SaspayTransactionStatus {
+  return value === 'PENDING' || value === 'SUCCESS' || value === 'FAILED' || value === 'CANCELLED';
+}
 
 /**
  * Client HTTP pour l'API officielle SasPay (https://docs.saspay.me).
@@ -69,7 +91,7 @@ export class SaspayService {
     if (!this.isValidAbsoluteUrl(url)) {
       this.logger.error(
         `SASPAY_RETURN_URL est absente ou invalide (valeur actuelle: "${url}"). ` +
-          "Configurez une URL absolue complète (ex: https://votre-pwa.vercel.app/paiement/retour) " +
+          'Configurez une URL absolue complète (ex: https://votre-pwa.vercel.app/paiement/retour) ' +
           "dans les variables d'environnement du service backend sur Render (variable déclarée avec sync:false, " +
           'elle doit être saisie manuellement dans le dashboard Render).',
       );
@@ -90,17 +112,20 @@ export class SaspayService {
    * donc systématiquement sur le fallback générique "Erreur Saspay",
    * masquant la vraie raison (ex: "return_url: Saisissez une URL valide.").
    */
-  private extractSaspayErrorMessage(json: Record<string, unknown>): string {
-    const errorField = json['error'];
+  private extractSaspayErrorMessage(json: unknown): string {
+    if (!isRecord(json)) return 'Erreur Saspay';
 
+    const errorField = json['error'];
     if (typeof errorField === 'string' && errorField) {
       return errorField;
     }
 
-    if (errorField && typeof errorField === 'object') {
+    if (isRecord(errorField)) {
       const parts: string[] = [];
-      for (const [field, messages] of Object.entries(errorField as Record<string, unknown>)) {
-        const text = Array.isArray(messages) ? messages.join(' ') : String(messages);
+      for (const [field, messages] of Object.entries(errorField)) {
+        const text = Array.isArray(messages)
+          ? messages.map((message) => String(message)).join(' ')
+          : String(messages);
         parts.push(`${field}: ${text}`);
       }
       if (parts.length > 0) return parts.join(' | ');
@@ -112,6 +137,91 @@ export class SaspayService {
     }
 
     return 'Erreur Saspay';
+  }
+
+  /**
+   * Valide l'enveloppe observée en production et renvoie explicitement `data`.
+   * Ne jamais typer directement la réponse HTTP complète comme une session :
+   * cela ferait lire `response.id` au lieu de `response.data.id`.
+   */
+  private parseCheckoutSessionResponse(value: unknown): SaspayCheckoutSessionResponse {
+    if (!isRecord(value) || value['success'] !== true || !isRecord(value['data'])) {
+      this.throwInvalidCheckoutResponse(
+        'SASPAY a créé la session checkout mais a renvoyé une enveloppe de réponse invalide',
+      );
+    }
+
+    const responseData = value['data'];
+    const id = responseData['id'];
+    if (!isNonEmptyString(id)) {
+      this.throwInvalidCheckoutResponse('SASPAY checkout session created but data.id is missing');
+    }
+
+    const checkoutUrl = responseData['checkout_url'];
+    if (!isNonEmptyString(checkoutUrl)) {
+      this.throwInvalidCheckoutResponse(
+        'SASPAY checkout session created but data.checkout_url is missing',
+      );
+    }
+    if (!this.isValidAbsoluteUrl(checkoutUrl)) {
+      this.throwInvalidCheckoutResponse(
+        'SASPAY checkout session created but data.checkout_url is invalid',
+      );
+    }
+
+    const status = responseData['status'];
+    if (!isTransactionStatus(status)) {
+      this.throwInvalidCheckoutResponse(
+        'SASPAY checkout session created but data.status is missing or invalid',
+      );
+    }
+
+    const amount = responseData['amount'];
+    const currency = responseData['currency'];
+    if (!isNonEmptyString(amount) || !isNonEmptyString(currency)) {
+      this.throwInvalidCheckoutResponse(
+        'SASPAY checkout session created but data.amount or data.currency is missing',
+      );
+    }
+
+    const code = value['code'];
+    if (typeof code !== 'number') {
+      this.throwInvalidCheckoutResponse(
+        'SASPAY checkout session created but the response code is missing or invalid',
+      );
+    }
+
+    const metadata = responseData['metadata'];
+    const session: SaspayCheckoutSession = {
+      id,
+      merchant: optionalString(responseData['merchant']),
+      created_by_member: optionalStringOrNull(responseData['created_by_member']),
+      slug: optionalString(responseData['slug']),
+      checkout_url: checkoutUrl,
+      amount,
+      currency,
+      description: optionalString(responseData['description']),
+      country: optionalString(responseData['country']),
+      customer_email: optionalString(responseData['customer_email']),
+      customer_name: optionalString(responseData['customer_name']),
+      customer_phone: optionalString(responseData['customer_phone']),
+      return_url: optionalString(responseData['return_url']),
+      metadata: isRecord(metadata) ? metadata : undefined,
+      status,
+      expires_at: optionalStringOrNull(responseData['expires_at']),
+      transaction: optionalStringOrNull(responseData['transaction']),
+      payment_link: optionalStringOrNull(responseData['payment_link']),
+      paid_at: optionalStringOrNull(responseData['paid_at']),
+      created_at: optionalString(responseData['created_at']),
+      updated_at: optionalString(responseData['updated_at']),
+    };
+
+    return { success: true, data: session, code };
+  }
+
+  private throwInvalidCheckoutResponse(message: string): never {
+    this.logger.error(message);
+    throw new BadGatewayException(message);
   }
 
   private async request<T>(
@@ -131,10 +241,9 @@ export class SaspayService {
       headers['Idempotency-Key'] = idempotencyKey;
     }
 
-    // Log de la requête sortante (jamais l'Authorization/API key, uniquement
-    // le corps métier) pour pouvoir diagnostiquer les échecs directement
-    // depuis les logs Render sans avoir à reproduire le bug en local.
-    this.logger.log(`Saspay ${method} ${path} -> requête: ${JSON.stringify(body ?? {})}`);
+    // Ne jamais journaliser le corps : il contient l'email, le téléphone et
+    // les métadonnées du client. Les logs gardent uniquement la route et le statut.
+    this.logger.log(`Saspay ${method} ${path} -> envoi`);
 
     let response: Response;
     try {
@@ -143,23 +252,26 @@ export class SaspayService {
         headers,
         body: body ? JSON.stringify(body) : undefined,
       });
-    } catch (err) {
-      this.logger.error(`Erreur réseau vers Saspay (${path}): ${(err as Error).message}`);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'erreur réseau inconnue';
+      this.logger.error(`Erreur réseau vers Saspay (${path}): ${message}`);
       throw new BadGatewayException('Impossible de contacter Saspay. Réessayez plus tard.');
     }
 
-    const json = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-
-    this.logger.log(`Saspay ${method} ${path} -> réponse (${response.status}): ${JSON.stringify(json)}`);
+    const json: unknown = await response.json().catch(() => ({}));
+    this.logger.log(`Saspay ${method} ${path} -> HTTP ${response.status}`);
 
     if (!response.ok) {
       const detailedMessage = this.extractSaspayErrorMessage(json);
-      this.logger.warn(`Saspay ${method} ${path} -> ${response.status}: ${JSON.stringify(json)}`);
+      this.logger.warn(`Saspay ${method} ${path} -> HTTP ${response.status}`);
       this.logger.error(`Détail erreur Saspay (${method} ${path}): ${detailedMessage}`);
-      const error = json as { code?: string | number };
+      const providerCode = isRecord(json) ? json['code'] : undefined;
       throw new BadGatewayException({
         message: detailedMessage,
-        code: error.code ?? 'saspay_error',
+        code:
+          typeof providerCode === 'string' || typeof providerCode === 'number'
+            ? providerCode
+            : 'saspay_error',
         httpStatus: response.status,
       });
     }
@@ -180,12 +292,13 @@ export class SaspayService {
     );
   }
 
-  /** POST /checkout-sessions/ — page de paiement hébergée */
+  /** POST /checkout-sessions/ — page de paiement hébergée. Retourne `response.data`. */
   async createCheckoutSession(
     payload: SaspayCheckoutCreateRequest,
   ): Promise<SaspayCheckoutSession> {
     // NB: Idempotency-Key n'est pas supporté par cet endpoint (doc officielle).
-    return this.request<SaspayCheckoutSession>('POST', '/checkout-sessions/', payload);
+    const response = await this.request<unknown>('POST', '/checkout-sessions/', payload);
+    return this.parseCheckoutSessionResponse(response).data;
   }
 
   /** GET /checkout-sessions/{id}/ */
